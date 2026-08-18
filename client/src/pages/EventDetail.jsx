@@ -77,7 +77,7 @@ useEffect(() => {
                 setSuccessMsg('Booking requested! Awaiting admin confirmation.');
                 setShowOTP(false);
                 // Update local seats count dynamically after booking
-                setEvent({ ...event, availableSeats: event.availableSeats - 1 });
+                //setEvent({ ...event, availableSeats: event.availableSeats - 1 });
             }
         } catch (err) {
             setError(err.response?.data?.message || 'Booking failed');
