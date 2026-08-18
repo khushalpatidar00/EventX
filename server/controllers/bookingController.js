@@ -73,7 +73,12 @@ exports.confirmBooking = async (req, res) => {
 
         event.availableSeats -= 1;
         await event.save();
+        const io = req.app.get('io');
 
+io.emit('eventSeatsUpdated', {
+    eventId: event._id.toString(),
+    availableSeats: event.availableSeats
+});
         // Send email on admin confirmation
         await sendBookingEmail(booking.userId.email, booking.userId.name, booking.eventId.title);
 

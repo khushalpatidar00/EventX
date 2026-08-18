@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import api from '../utils/axios';
 import { AuthContext } from '../context/AuthContext';
 import { FaCalendarAlt, FaMapMarkerAlt, FaChair, FaMoneyBillWave } from 'react-icons/fa';
+import socket from '../utils/socket';
 
 const EventDetail = () => {
     const { id } = useParams();
@@ -30,6 +31,33 @@ const EventDetail = () => {
         fetchEvent();
     }, [id]);
 
+    useEffect(() => {
+    const handleConnect = () => {
+        console.log('Connected to realtime server:', socket.id);
+    };
+
+    socket.on('connect', handleConnect);
+
+    return () => {
+        socket.off('connect', handleConnect);
+    };
+}, []);
+useEffect(() => {
+    const handleSeatsUpdated = (data) => {
+        if (data.eventId === id) {
+            setEvent(prevEvent => ({
+                ...prevEvent,
+                availableSeats: data.availableSeats
+            }));
+        }
+    };
+
+    socket.on('eventSeatsUpdated', handleSeatsUpdated);
+
+    return () => {
+        socket.off('eventSeatsUpdated', handleSeatsUpdated);
+    };
+}, [id]);
     const handleBooking = async () => {
         if (!user) {
             navigate('/login');
