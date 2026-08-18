@@ -4,6 +4,7 @@ const OTP = require('../models/OTP');
 const { sendBookingEmail, sendOTPEmail } = require('../utils/email');
 
 const generateOTP = () => Math.floor(100000 + Math.random() * 900000).toString();
+const { redisClient } = require('../config/redis');
 
 exports.sendBookingOTP = async (req, res) => {
     try {
@@ -18,37 +19,136 @@ exports.sendBookingOTP = async (req, res) => {
 };
 
 exports.bookEvent = async (req, res) => {
+    let lockKey = null;
+    let seatReserved = false;
+
     try {
         const { eventId, otp } = req.body;
 
-        // Verify OTP explicitly before proceeding
-        const validOTP = await OTP.findOne({ email: req.user.email, otp, action: 'event_booking' });
+        // Verify OTP
+        const validOTP = await OTP.findOne({
+            email: req.user.email,
+            otp,
+            action: 'event_booking'
+        });
+
         if (!validOTP) {
-            return res.status(400).json({ message: 'Invalid or expired OTP for booking' });
+            return res.status(400).json({
+                message: 'Invalid or expired OTP for booking'
+            });
         }
 
         const event = await Event.findById(eventId);
-        if (!event) return res.status(404).json({ message: 'Event not found' });
-        if (event.availableSeats <= 0) return res.status(400).json({ message: 'No seats available' });
 
-        const existingBooking = await Booking.findOne({ userId: req.user.id, eventId });
-        if (existingBooking && existingBooking.status !== 'cancelled') {
-            return res.status(400).json({ message: 'Already booked or pending' });
+        if (!event) {
+            return res.status(404).json({
+                message: 'Event not found'
+            });
         }
+
+        // Prevent duplicate booking
+        const existingBooking = await Booking.findOne({
+            userId: req.user.id,
+            eventId
+        });
+
+        if (existingBooking && !['cancelled', 'expired'].includes(existingBooking.status)) {
+            return res.status(400).json({
+                message: 'Already booked or pending'
+            });
+        }
+
+        // Redis temporary lock for this user's booking
+        lockKey = `event:${eventId}:user:${req.user.id}`;
+
+        const lockAcquired = await redisClient.set(
+            lockKey,
+            'locked',
+            {
+                NX: true,
+                EX: 300
+            }
+        );
+
+        if (!lockAcquired) {
+            return res.status(409).json({
+                message: 'You already have a temporary reservation for this event'
+            });
+        }
+
+        // Atomically reserve one seat
+        const updatedEvent = await Event.findOneAndUpdate(
+            {
+                _id: eventId,
+                availableSeats: { $gt: 0 }
+            },
+            {
+                $inc: { availableSeats: -1 }
+            },
+            {
+                new: true
+            }
+        );
+
+        if (!updatedEvent) {
+            await redisClient.del(lockKey);
+            lockKey = null;
+
+            return res.status(400).json({
+                message: 'No seats available'
+            });
+        }
+
+        seatReserved = true;
+
+        // Create pending booking
+        const lockExpiresAt = new Date(Date.now() + 5 * 60 * 1000);
 
         const booking = await Booking.create({
             userId: req.user.id,
             eventId,
             status: 'pending',
             paymentStatus: 'not_paid',
-            amount: event.ticketPrice
+            amount: event.ticketPrice,
+            lockExpiresAt
         });
 
-        await OTP.deleteOne({ _id: validOTP._id }); // cleanup
+        // OTP cleanup
+        await OTP.deleteOne({ _id: validOTP._id });
 
-        res.status(201).json({ message: 'Booking request submitted', booking });
+        // Realtime availability update
+        const io = req.app.get('io');
+
+        io.emit('eventSeatsUpdated', {
+            eventId: eventId.toString(),
+            availableSeats: updatedEvent.availableSeats
+        });
+
+        res.status(201).json({
+            message: 'Seat reserved temporarily. Booking is pending confirmation.',
+            booking
+        });
+
     } catch (error) {
-        res.status(500).json({ message: 'Server Error', error: error.message });
+        // Roll back Redis lock if something failed
+        if (lockKey) {
+            await redisClient.del(lockKey).catch(() => {});
+        }
+
+        // Roll back reserved seat if it was already deducted
+        if (seatReserved) {
+            await Event.findByIdAndUpdate(
+                req.body.eventId,
+                { $inc: { availableSeats: 1 } }
+            ).catch(() => {});
+        }
+
+        console.error('Booking Error:', error);
+
+        res.status(500).json({
+            message: 'Server Error',
+            error: error.message
+        });
     }
 };
 
@@ -57,13 +157,21 @@ exports.confirmBooking = async (req, res) => {
         const { paymentStatus } = req.body; // 'paid' or 'not_paid'
         const booking = await Booking.findById(req.params.id).populate('userId').populate('eventId');
         if (!booking) return res.status(404).json({ message: 'Booking not found' });
+        if (booking.status === 'expired') {
+    return res.status(400).json({
+        message: 'This booking has expired'
+    });
+}
+
+if (booking.lockExpiresAt && booking.lockExpiresAt <= new Date()) {
+    return res.status(400).json({
+        message: 'Seat reservation has expired'
+    });
+}
 
         if (booking.status === 'confirmed') return res.status(400).json({ message: 'Booking is already confirmed' });
 
-        const event = await Event.findById(booking.eventId._id);
-        if (event.availableSeats <= 0) {
-            return res.status(400).json({ message: 'No seats available to confirm this booking' });
-        }
+       
 
         booking.status = 'confirmed';
         if (paymentStatus) {
@@ -71,8 +179,9 @@ exports.confirmBooking = async (req, res) => {
         }
         await booking.save();
 
-        event.availableSeats -= 1;
-        await event.save();
+       // Release the temporary Redis lock after confirmation
+const lockKey = `event:${booking.eventId._id}:user:${booking.userId._id}`;
+await redisClient.del(lockKey);
         const io = req.app.get('io');
 
 io.emit('eventSeatsUpdated', {
@@ -102,28 +211,75 @@ exports.getMyBookings = async (req, res) => {
 exports.cancelBooking = async (req, res) => {
     try {
         const booking = await Booking.findById(req.params.id);
-        if (!booking) return res.status(404).json({ message: 'Booking not found' });
-        if (booking.userId.toString() !== req.user.id && req.user.role !== 'admin') {
-            return res.status(403).json({ message: 'Not authorized' });
+
+        if (!booking) {
+            return res.status(404).json({
+                message: 'Booking not found'
+            });
         }
-        if (booking.status === 'cancelled') return res.status(400).json({ message: 'Already cancelled' });
 
-        const wasConfirmed = booking.status === 'confirmed';
+        if (
+            booking.userId.toString() !== req.user.id &&
+            req.user.role !== 'admin'
+        ) {
+            return res.status(403).json({
+                message: 'Not authorized'
+            });
+        }
 
+        if (booking.status === 'cancelled') {
+            return res.status(400).json({
+                message: 'Already cancelled'
+            });
+        }
+
+        if (booking.status === 'expired') {
+            return res.status(400).json({
+                message: 'Booking has already expired'
+            });
+        }
+
+        const wasReserved =
+            booking.status === 'pending' ||
+            booking.status === 'confirmed';
+
+        // Cancel booking
         booking.status = 'cancelled';
         await booking.save();
 
-        // Only restore the seat if it was actually confirmed and deducted
-        if (wasConfirmed) {
-            const event = await Event.findById(booking.eventId);
+        // Remove Redis lock
+        const lockKey = `event:${booking.eventId}:user:${booking.userId}`;
+        await redisClient.del(lockKey);
+
+        // Release seat if this booking had reserved one
+        if (wasReserved) {
+            const event = await Event.findByIdAndUpdate(
+                booking.eventId,
+                { $inc: { availableSeats: 1 } },
+                { new: true }
+            );
+
+            // Notify connected clients
             if (event) {
-                event.availableSeats += 1;
-                await event.save();
+                const io = req.app.get('io');
+
+                io.emit('eventSeatsUpdated', {
+                    eventId: event._id.toString(),
+                    availableSeats: event.availableSeats
+                });
             }
         }
 
-        res.json({ message: 'Booking cancelled successfully' });
+        res.json({
+            message: 'Booking cancelled successfully'
+        });
+
     } catch (error) {
-        res.status(500).json({ message: 'Server Error', error: error.message });
+        console.error('Cancel Booking Error:', error);
+
+        res.status(500).json({
+            message: 'Server Error',
+            error: error.message
+        });
     }
 };

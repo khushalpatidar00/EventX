@@ -1,3 +1,5 @@
+const startBookingExpiryMonitor = require('./utils/bookingExpiry');
+const { connectRedis } = require('./config/redis');
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -48,8 +50,15 @@ mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/eventx')
     .then(() => console.log('MongoDB Connected'))
     .catch(err => console.error('MongoDB Connection Error:', err));
 
+
+    connectRedis().catch(err => {
+    console.error('Redis Connection Error:', err);
+});
+
+
 const PORT = process.env.PORT || 5000;
 
 server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
+    startBookingExpiryMonitor(io);
 });
