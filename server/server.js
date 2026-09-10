@@ -12,7 +12,7 @@ dotenv.config();
 const authRoutes = require('./routes/auth');
 const eventRoutes = require('./routes/events');
 const bookingRoutes = require('./routes/bookings');
-
+const paymentRoutes = require('./routes/payment');
 const app = express();
 
 // Create HTTP server
@@ -45,6 +45,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/events', eventRoutes);
 app.use('/api/bookings', bookingRoutes);
 
+app.use('/api/payment', paymentRoutes);
 // Database Connection
 mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/eventx')
     .then(() => console.log('MongoDB Connected'))
