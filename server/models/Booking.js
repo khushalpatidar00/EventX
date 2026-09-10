@@ -17,6 +17,12 @@ paymentStatus: {
     type: String,
     enum: ['paid', 'not_paid'],
     default: 'not_paid'
+},razorpayOrderId: {
+    type: String
+},
+
+razorpayPaymentId: {
+    type: String
 },
     amount: { type: Number, required: true },
     bookedAt: { type: Date, default: Date.now }
