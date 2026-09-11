@@ -112,7 +112,48 @@ exports.bookEvent = async (req, res) => {
             amount: event.ticketPrice,
             lockExpiresAt
         });
+        // Free event: confirm booking immediately
+if (event.ticketPrice === 0) {
+    booking.status = 'confirmed';
+    booking.paymentStatus = 'not_paid';
+    booking.amount = 0;
+    booking.lockExpiresAt = null;
 
+    await booking.save();
+
+    // Release Redis lock
+    await redisClient.del(lockKey);
+
+    // OTP cleanup
+    await OTP.deleteOne({ _id: validOTP._id });
+
+    // Realtime availability update
+    const io = req.app.get('io');
+
+    io.emit('eventSeatsUpdated', {
+        eventId: eventId.toString(),
+        availableSeats: updatedEvent.availableSeats
+    });
+
+    // Populate booking for email
+    const populatedBooking = await Booking.findById(booking._id)
+        .populate('userId', 'name email')
+        .populate('eventId', 'title date location');
+
+    // Send confirmation email
+    sendBookingEmail(
+        populatedBooking.userId.email,
+        populatedBooking.userId.name,
+        populatedBooking.eventId.title
+    ).catch((error) => {
+        console.error('Free booking email error:', error);
+    });
+
+    return res.status(201).json({
+        message: 'Free event booked successfully.',
+        booking: populatedBooking
+    });
+}
         // OTP cleanup
         await OTP.deleteOne({ _id: validOTP._id });
 

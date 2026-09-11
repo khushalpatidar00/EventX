@@ -72,13 +72,72 @@ useEffect(() => {
                 await api.post('/bookings/send-otp');
                 setShowOTP(true);
                 setSuccessMsg('OTP sent to your email. Please verify to confirm booking.');
-            } else {
-                await api.post('/bookings', { eventId: event._id, otp });
-                setSuccessMsg('Booking requested! Awaiting admin confirmation.');
+           } else {
+    const bookingResponse = await api.post('/bookings', {
+        eventId: event._id,
+        otp
+    });
+
+   const booking = bookingResponse.data.booking;
+
+// Free event: booking is already confirmed
+if (booking.status === 'confirmed' && booking.paymentStatus === 'not_paid') {
+    setSuccessMsg('Registration successful! You have been registered for the free event.');
+    setShowOTP(false);
+    setOtp('');
+    return;
+}
+
+// Paid event: create Razorpay order
+const orderResponse = await api.post('/payment/create-order', {
+    bookingId: booking._id
+});
+
+const order = orderResponse.data.order;
+
+    const options = {
+        key: import.meta.env.VITE_RAZORPAY_KEY_ID,
+        amount: order.amount,
+        currency: order.currency,
+        name: 'EventX',
+        description: event.title,
+        order_id: order.id,
+
+        handler: async function (response) {
+            try {
+                await api.post('/payment/verify', {
+                    bookingId: booking._id,
+                    razorpay_order_id: response.razorpay_order_id,
+                    razorpay_payment_id: response.razorpay_payment_id,
+                    razorpay_signature: response.razorpay_signature
+                });
+
+                setSuccessMsg('Payment successful! Booking confirmed.');
                 setShowOTP(false);
-                // Update local seats count dynamically after booking
-                //setEvent({ ...event, availableSeats: event.availableSeats - 1 });
+            } catch (err) {
+                setError(
+                    err.response?.data?.message ||
+                    'Payment verification failed'
+                );
             }
+        },
+
+        prefill: {
+            name: user.name,
+            email: user.email
+        },
+
+        theme: {
+            color: '#111827'
+        }
+    };
+
+    const razorpay = new window.Razorpay(options);
+
+    razorpay.open();
+
+    setShowOTP(false);
+}
         } catch (err) {
             setError(err.response?.data?.message || 'Booking failed');
         } finally {
